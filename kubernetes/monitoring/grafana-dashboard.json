@@ -1,0 +1,9 @@
+{
+  "title": "Student Platform MVP",
+  "schemaVersion": 39,
+  "panels": [
+    {"type":"stat","title":"Running Environments","targets":[{"expr":"platform_running_environments"}],"gridPos":{"h":6,"w":6,"x":0,"y":0}},
+    {"type":"timeseries","title":"Provisioning Duration","targets":[{"expr":"histogram_quantile(0.95, sum(rate(platform_provisioning_duration_seconds_bucket[5m])) by (le, action))"}],"gridPos":{"h":8,"w":12,"x":6,"y":0}},
+    {"type":"timeseries","title":"Provisioning Results","targets":[{"expr":"sum(rate(platform_provisioning_results_total[5m])) by (result, action)"}],"gridPos":{"h":8,"w":12,"x":0,"y":8}}
+  ]
+}

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Student Platform</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<main>
+  <header><h1>Student Platform</h1><p>Request what you need. The platform handles the infrastructure.</p></header>
+  <section id="auth" class="card">
+    <h2>Sign in</h2>
+    <input id="email" type="email" placeholder="student@example.edu" />
+    <input id="password" type="password" placeholder="Password (10+ characters)" />
+    <div class="actions"><button onclick="login(false)">Sign in</button><button class="secondary" onclick="login(true)">Register</button></div>
+    <p id="auth-msg"></p>
+  </section>
+  <section id="app" hidden>
+    <h2>Available Environments</h2>
+    <div class="grid">
+      <article class="card"><h3>Backend</h3><p>FastAPI + PostgreSQL + Redis</p><button onclick="provision('backend')">Provision</button></article>
+      <article class="card"><h3>Data</h3><p>Jupyter + Apache Spark + MinIO</p><button onclick="provision('data')">Provision</button></article>
+    </div>
+    <h2>Your Environments</h2>
+    <div id="environments"></div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
