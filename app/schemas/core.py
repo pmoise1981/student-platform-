@@ -53,6 +53,7 @@ class EnvironmentOut(BaseModel):
 
 class EnvironmentDetail(EnvironmentOut):
     components: list[ComponentStatus] = []
+    app_url: str | None = None
 
 
 class CredentialsOut(BaseModel):
