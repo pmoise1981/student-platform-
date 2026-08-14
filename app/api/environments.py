@@ -1,9 +1,11 @@
 import logging
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.security import get_current_user
+from app.config import get_settings
 from app.db import get_db
 from app.kubernetes.client import KubernetesPlatform
 from app.models import Environment, EnvironmentStatus, JobAction, User
@@ -21,10 +23,18 @@ def owned_environment(db: Session, user: User, env_id: str) -> Environment:
     return env
 
 
+def application_url(env: Environment) -> str | None:
+    if env.template_id != "backend" or env.status == EnvironmentStatus.deleted:
+        return None
+    short = env.id.split("-")[0]
+    return f"http://app-backend-{short}.localhost:{get_settings().ingress_port}"
+
+
 def serialize_detail(env: Environment) -> EnvironmentDetail:
     return EnvironmentDetail(
         **EnvironmentOut.model_validate(env).model_dump(),
         components=[{"name": d.component, "healthy": d.healthy, "message": d.last_message} for d in env.deployments],
+        app_url=application_url(env),
     )
 
 
@@ -44,7 +54,11 @@ def provision(
 
 @router.get("", response_model=list[EnvironmentOut])
 def list_environments(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return db.scalars(select(Environment).where(Environment.user_id == user.id).order_by(Environment.created_at.desc())).all()
+    return db.scalars(
+        select(Environment)
+        .where(Environment.user_id == user.id, Environment.status != EnvironmentStatus.deleted)
+        .order_by(Environment.created_at.desc())
+    ).all()
 
 
 @router.get("/{env_id}", response_model=EnvironmentDetail)
