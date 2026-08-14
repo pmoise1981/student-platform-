@@ -26,10 +26,10 @@ class ComponentHealth:
 
 
 class KubernetesPlatform:
-    """Small, explicit Kubernetes adapter.
+    """Kubernetes adapter for the two supported student workspace golden paths.
 
-    Resources use deterministic names and server-side patch/create behavior. That makes
-    provisioning safe to retry after an API or worker restart instead of assuming a clean slate.
+    Resource names are deterministic and create-or-patch operations make provisioning
+    safe to retry after a worker or Kubernetes API interruption.
     """
 
     def __init__(self):
@@ -43,7 +43,7 @@ class KubernetesPlatform:
         self.core.get_api_resources()
 
     @staticmethod
-    def _apply(create, patch, name: str, namespace: str | None, body: dict):
+    def _apply(create, patch, name: str, namespace: str | None, body):
         try:
             if namespace:
                 return create(namespace=namespace, body=body)
@@ -61,10 +61,10 @@ class KubernetesPlatform:
 
     def ensure_controls(self, env: Environment):
         a = env.allocation
-        q = quota_body(env.namespace, a.cpu_limit, a.memory_limit, a.storage_limit, a.max_pods)
-        self._apply(self.core.create_namespaced_resource_quota, self.core.patch_namespaced_resource_quota, "environment-quota", env.namespace, q)
-        lr = limit_range_body(env.namespace)
-        self._apply(self.core.create_namespaced_limit_range, self.core.patch_namespaced_limit_range, "defaults", env.namespace, lr)
+        quota = quota_body(env.namespace, a.cpu_limit, a.memory_limit, a.storage_limit, a.max_pods)
+        self._apply(self.core.create_namespaced_resource_quota, self.core.patch_namespaced_resource_quota, "environment-quota", env.namespace, quota)
+        limits = limit_range_body(env.namespace)
+        self._apply(self.core.create_namespaced_limit_range, self.core.patch_namespaced_limit_range, "defaults", env.namespace, limits)
 
     def ensure_secret(self, env: Environment) -> dict[str, str]:
         name = "environment-credentials"
@@ -74,45 +74,70 @@ class KubernetesPlatform:
         except ApiException as exc:
             if exc.status != 404:
                 raise
+
         if env.template_id == "backend":
             values = {
                 "POSTGRES_USER": "student",
                 "POSTGRES_PASSWORD": secrets.token_urlsafe(20),
                 "POSTGRES_DB": "studentdb",
                 "REDIS_URL": "redis://redis:6379/0",
+                "CODE_SERVER_PASSWORD": secrets.token_urlsafe(16),
             }
         else:
             values = {
                 "MINIO_ROOT_USER": "student",
                 "MINIO_ROOT_PASSWORD": secrets.token_urlsafe(20),
                 "JUPYTER_TOKEN": secrets.token_urlsafe(20),
-                "MINIO_ENDPOINT": "http://minio:9000",
             }
-        body = client.V1Secret(
-            metadata=client.V1ObjectMeta(name=name),
-            string_data=values,
-            type="Opaque",
-        )
+
+        body = client.V1Secret(metadata=client.V1ObjectMeta(name=name), string_data=values, type="Opaque")
         self.core.create_namespaced_secret(env.namespace, body)
         return values
 
-    def _deployment(self, env: Environment, name: str, image: str, ports=None, env_vars=None, command=None, args=None, readiness_probe=None, volume_name=None, mount_path=None):
-        ports = [client.V1ContainerPort(container_port=p) for p in (ports or [])]
+    def _deployment(
+        self,
+        env: Environment,
+        name: str,
+        image: str,
+        ports=None,
+        env_vars=None,
+        secret_aliases=None,
+        command=None,
+        args=None,
+        readiness_probe=None,
+        volume_name=None,
+        mount_path=None,
+        fs_group=None,
+    ):
+        container_ports = [client.V1ContainerPort(container_port=p) for p in (ports or [])]
         env_list = []
         for var in env_vars or []:
             if isinstance(var, tuple):
                 env_list.append(client.V1EnvVar(name=var[0], value=var[1]))
             else:
-                env_list.append(client.V1EnvVar(
-                    name=var,
+                env_list.append(
+                    client.V1EnvVar(
+                        name=var,
+                        value_from=client.V1EnvVarSource(
+                            secret_key_ref=client.V1SecretKeySelector(name="environment-credentials", key=var)
+                        ),
+                    )
+                )
+        for env_name, secret_key in (secret_aliases or {}).items():
+            env_list.append(
+                client.V1EnvVar(
+                    name=env_name,
                     value_from=client.V1EnvVarSource(
-                        secret_key_ref=client.V1SecretKeySelector(name="environment-credentials", key=var)
+                        secret_key_ref=client.V1SecretKeySelector(name="environment-credentials", key=secret_key)
                     ),
-                ))
+                )
+            )
+
         container = client.V1Container(
             name=name,
             image=image,
-            ports=ports,
+            image_pull_policy="IfNotPresent",
+            ports=container_ports,
             env=env_list,
             command=command,
             args=args,
@@ -133,13 +158,18 @@ class KubernetesPlatform:
                     metadata=client.V1ObjectMeta(labels=labels),
                     spec=client.V1PodSpec(
                         containers=[container],
-                        volumes=[client.V1Volume(name=volume_name, persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(claim_name=volume_name))] if volume_name else None,
+                        security_context=client.V1PodSecurityContext(fs_group=fs_group) if fs_group else None,
+                        volumes=[
+                            client.V1Volume(
+                                name=volume_name,
+                                persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(claim_name=volume_name),
+                            )
+                        ] if volume_name else None,
                     ),
                 ),
             ),
         )
         self._apply(self.apps.create_namespaced_deployment, self.apps.patch_namespaced_deployment, name, env.namespace, body)
-
 
     def _pvc(self, env: Environment, name: str, size: str):
         body = client.V1PersistentVolumeClaim(
@@ -153,21 +183,21 @@ class KubernetesPlatform:
 
     @staticmethod
     def _tcp_probe(port: int):
-        return client.V1Probe(tcp_socket=client.V1TCPSocketAction(port=port), initial_delay_seconds=3, period_seconds=3, failure_threshold=20)
+        return client.V1Probe(tcp_socket=client.V1TCPSocketAction(port=port), initial_delay_seconds=5, period_seconds=3, failure_threshold=30)
 
     @staticmethod
     def _http_probe(port: int, path: str):
-        return client.V1Probe(http_get=client.V1HTTPGetAction(port=port, path=path), initial_delay_seconds=3, period_seconds=3, failure_threshold=20)
+        return client.V1Probe(http_get=client.V1HTTPGetAction(port=port, path=path), initial_delay_seconds=5, period_seconds=3, failure_threshold=30)
 
     @staticmethod
     def _exec_probe(command: list[str]):
-        return client.V1Probe(_exec=client.V1ExecAction(command=command), initial_delay_seconds=3, period_seconds=3, failure_threshold=20)
+        return client.V1Probe(_exec=client.V1ExecAction(command=command), initial_delay_seconds=5, period_seconds=3, failure_threshold=30)
 
-    def _service(self, env: Environment, name: str, port: int, target: int | None = None):
+    def _service(self, env: Environment, name: str, port: int, target: int | None = None, selector: str | None = None):
         body = client.V1Service(
             metadata=client.V1ObjectMeta(name=name),
             spec=client.V1ServiceSpec(
-                selector={"app": name},
+                selector={"app": selector or name},
                 ports=[client.V1ServicePort(port=port, target_port=target or port)],
             ),
         )
@@ -176,26 +206,47 @@ class KubernetesPlatform:
     def ensure_workloads(self, env: Environment):
         if env.template_id == "backend":
             self._pvc(env, "postgres-data", "2Gi")
+            self._pvc(env, "workspace-data", "2Gi")
             self._deployment(
-                env, "postgres", "postgres:16-alpine", [5432],
+                env,
+                "postgres",
+                "postgres:16-alpine",
+                [5432],
                 ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"],
                 readiness_probe=self._exec_probe(["pg_isready", "-U", "student", "-d", "studentdb"]),
-                volume_name="postgres-data", mount_path="/var/lib/postgresql/data",
+                volume_name="postgres-data",
+                mount_path="/var/lib/postgresql/data",
             )
             self._service(env, "postgres", 5432)
             self._deployment(env, "redis", "redis:7-alpine", [6379], readiness_probe=self._exec_probe(["redis-cli", "ping"]))
             self._service(env, "redis", 6379)
             self._deployment(
                 env,
-                "fastapi",
-                "student-platform-backend:local",
-                [8000],
-                [("DATABASE_HOST", "postgres"), ("REDIS_HOST", "redis")],
-                readiness_probe=self._http_probe(8000, "/health"),
+                "workspace",
+                "student-platform-backend-workspace:local",
+                [8080, 8000],
+                [
+                    "POSTGRES_USER",
+                    "POSTGRES_PASSWORD",
+                    "POSTGRES_DB",
+                    "REDIS_URL",
+                    ("DATABASE_HOST", "postgres"),
+                ],
+                secret_aliases={"PASSWORD": "CODE_SERVER_PASSWORD"},
+                readiness_probe=self._exec_probe([
+                    "/bin/bash",
+                    "-lc",
+                    "curl -fsS http://127.0.0.1:8080/healthz >/dev/null && curl -fsS http://127.0.0.1:8000/health >/dev/null",
+                ]),
+                volume_name="workspace-data",
+                mount_path="/home/coder/project",
+                fs_group=1000,
             )
-            self._service(env, "fastapi", 80, 8000)
+            self._service(env, "workspace", 80, 8080, selector="workspace")
+            self._service(env, "student-app", 80, 8000, selector="workspace")
         else:
             self._pvc(env, "minio-data", "2Gi")
+            self._pvc(env, "workspace-data", "2Gi")
             self._deployment(
                 env,
                 "minio",
@@ -204,30 +255,58 @@ class KubernetesPlatform:
                 ["MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"],
                 args=["server", "/data", "--console-address", ":9001"],
                 readiness_probe=self._http_probe(9000, "/minio/health/ready"),
-                volume_name="minio-data", mount_path="/data",
+                volume_name="minio-data",
+                mount_path="/data",
             )
             self._service(env, "minio", 9000)
+            self._service(env, "minio-console", 80, 9001, selector="minio")
             self._deployment(
                 env,
                 "jupyter",
-                "quay.io/jupyter/pyspark-notebook:latest",
+                "student-platform-data-workspace:local",
                 [8888],
-                ["JUPYTER_TOKEN", "MINIO_ENDPOINT"],
+                [
+                    "JUPYTER_TOKEN",
+                    "MINIO_ROOT_USER",
+                    "MINIO_ROOT_PASSWORD",
+                    ("MINIO_HOST", "minio:9000"),
+                ],
                 readiness_probe=self._tcp_probe(8888),
+                volume_name="workspace-data",
+                mount_path="/home/jovyan/work",
+                fs_group=100,
             )
             self._service(env, "jupyter", 80, 8888)
 
     def ensure_ingress(self, env: Environment) -> str:
         settings = get_settings()
         short = env.id.split("-")[0]
-        host = f"{env.template_id}-{short}.localhost"
-        service = "fastapi" if env.template_id == "backend" else "jupyter"
-        body = client.V1Ingress(
-            metadata=client.V1ObjectMeta(name="environment"),
-            spec=client.V1IngressSpec(
-                rules=[client.V1IngressRule(
-                    host=host,
-                    http=client.V1HTTPIngressRuleValue(paths=[client.V1HTTPIngressPath(
+        workspace_host = f"{env.template_id}-{short}.localhost"
+        rules = []
+        if env.template_id == "backend":
+            app_host = f"app-backend-{short}.localhost"
+            rules.extend([
+                self._ingress_rule(workspace_host, "workspace"),
+                self._ingress_rule(app_host, "student-app"),
+            ])
+        else:
+            storage_host = f"storage-data-{short}.localhost"
+            rules.extend([
+                self._ingress_rule(workspace_host, "jupyter"),
+                self._ingress_rule(storage_host, "minio-console"),
+            ])
+
+        body = client.V1Ingress(metadata=client.V1ObjectMeta(name="environment"), spec=client.V1IngressSpec(rules=rules))
+        self._apply(self.networking.create_namespaced_ingress, self.networking.patch_namespaced_ingress, "environment", env.namespace, body)
+        return f"http://{workspace_host}:{settings.ingress_port}"
+
+    @staticmethod
+    def _ingress_rule(host: str, service: str):
+        return client.V1IngressRule(
+            host=host,
+            http=client.V1HTTPIngressRuleValue(
+                paths=[
+                    client.V1HTTPIngressPath(
                         path="/",
                         path_type="Prefix",
                         backend=client.V1IngressBackend(
@@ -236,40 +315,37 @@ class KubernetesPlatform:
                                 port=client.V1ServiceBackendPort(number=80),
                             )
                         ),
-                    )]),
-                )]
+                    )
+                ]
             ),
         )
-        self._apply(self.networking.create_namespaced_ingress, self.networking.patch_namespaced_ingress, "environment", env.namespace, body)
-        return f"http://{host}:{settings.ingress_port}"
 
-    def wait_ready(self, env: Environment, timeout: int = 180) -> list[ComponentHealth]:
-        required = ["postgres", "redis", "fastapi"] if env.template_id == "backend" else ["minio", "jupyter"]
+    def wait_ready(self, env: Environment, timeout: int = 240) -> list[ComponentHealth]:
+        required = ["postgres", "redis", "workspace"] if env.template_id == "backend" else ["minio", "jupyter"]
         deadline = time.time() + timeout
         last = []
         while time.time() < deadline:
             last = self.health(env)
-            if all(x.healthy for x in last if x.name in required) and len(last) >= len(required):
+            if len(last) >= len(required) and all(x.healthy for x in last if x.name in required):
                 if env.template_id == "data":
-                    last.append(ComponentHealth("spark", True, "Spark is bundled with the Jupyter PySpark image"))
+                    last.append(ComponentHealth("spark", True, "Spark is ready inside JupyterLab"))
                 return last
             time.sleep(3)
         details = "; ".join(f"{x.name}: {x.message}" for x in last)
-        raise ProvisioningError(f"Workloads did not become ready before timeout. {details}")
+        raise ProvisioningError(f"Workspace did not become ready before timeout. {details}")
 
     def health(self, env: Environment) -> list[ComponentHealth]:
-        required = ["postgres", "redis", "fastapi"] if env.template_id == "backend" else ["minio", "jupyter"]
+        required = ["postgres", "redis", "workspace"] if env.template_id == "backend" else ["minio", "jupyter"]
         out = []
         for name in required:
             try:
                 dep = self.apps.read_namespaced_deployment(name, env.namespace)
                 healthy = (dep.status.available_replicas or 0) >= 1
-                msg = "Healthy" if healthy else "Waiting for workload readiness"
-                out.append(ComponentHealth(name, healthy, msg))
+                out.append(ComponentHealth(name, healthy, "Healthy" if healthy else "Preparing workspace"))
             except ApiException as exc:
                 out.append(ComponentHealth(name, False, f"Resource unavailable ({exc.status})"))
         if env.template_id == "data" and all(x.healthy for x in out):
-            out.append(ComponentHealth("spark", True, "Available inside Jupyter"))
+            out.append(ComponentHealth("spark", True, "Available inside JupyterLab"))
         return out
 
     def get_credentials(self, env: Environment) -> dict[str, str]:
@@ -292,7 +368,7 @@ class KubernetesPlatform:
         return result
 
     def scale(self, env: Environment, replicas: int):
-        names = ["postgres", "redis", "fastapi"] if env.template_id == "backend" else ["minio", "jupyter"]
+        names = ["postgres", "redis", "workspace"] if env.template_id == "backend" else ["minio", "jupyter"]
         for name in names:
             self.apps.patch_namespaced_deployment_scale(name, env.namespace, {"spec": {"replicas": replicas}})
 
