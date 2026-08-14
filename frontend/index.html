@@ -8,24 +8,50 @@
 </head>
 <body>
 <main>
-  <header><h1>Student Platform</h1><p>Request what you need. The platform handles the infrastructure.</p></header>
-  <section id="auth" class="card">
-    <h2>Sign in</h2>
-    <input id="email" type="email" placeholder="student@example.edu" />
-    <input id="password" type="password" placeholder="Password (10+ characters)" />
-    <div class="actions"><button onclick="login(false)">Sign in</button><button class="secondary" onclick="login(true)">Register</button></div>
-    <p id="auth-msg"></p>
-  </section>
-  <section id="app" hidden>
-    <h2>Available Environments</h2>
-    <div class="grid">
-      <article class="card"><h3>Backend</h3><p>FastAPI + PostgreSQL + Redis</p><button onclick="provision('backend')">Provision</button></article>
-      <article class="card"><h3>Data</h3><p>Jupyter + Apache Spark + MinIO</p><button onclick="provision('data')">Provision</button></article>
+  <header class="topbar">
+    <div>
+      <h1>Student Platform</h1>
+      <p>Choose what you need. Your workspace arrives ready to use.</p>
     </div>
-    <h2>Your Environments</h2>
-    <div id="environments"></div>
+    <button id="logout" class="ghost" hidden onclick="logout()">Sign out</button>
+  </header>
+
+  <section id="auth" class="auth-card">
+    <div>
+      <span class="eyebrow">SELF-SERVICE WORKSPACES</span>
+      <h2>Get a technical environment without setting one up.</h2>
+      <p class="muted">Sign in, choose a workspace, and start working. Docker, Kubernetes, networking, storage, and service configuration stay behind the platform.</p>
+    </div>
+    <div class="auth-form">
+      <label>Email<input id="email" type="email" placeholder="student@example.edu" /></label>
+      <label>Password<input id="password" type="password" placeholder="10+ characters" /></label>
+      <div class="actions"><button onclick="login(false)">Sign in</button><button class="secondary" onclick="login(true)">Create account</button></div>
+      <p id="auth-msg" class="error"></p>
+    </div>
+  </section>
+
+  <section id="app" hidden>
+    <section class="hero"><span class="eyebrow">AVAILABLE WORKSPACES</span><h2>What do you want to work on?</h2></section>
+    <div class="grid templates">
+      <article class="card template-card">
+        <div class="template-icon">API</div><h3>Backend Workspace</h3>
+        <p>Browser VS Code with a starter FastAPI project, PostgreSQL, and Redis already connected.</p>
+        <ul><li>Persistent project files</li><li>Live FastAPI application URL</li><li>PostgreSQL + Redis ready</li></ul>
+        <button onclick="provision('backend')">Provision Backend</button>
+      </article>
+      <article class="card template-card">
+        <div class="template-icon">DATA</div><h3>Data Workspace</h3>
+        <p>JupyterLab with Apache Spark and private MinIO object storage already configured.</p>
+        <ul><li>Persistent notebooks</li><li>Spark ready in Python</li><li>MinIO object storage</li></ul>
+        <button onclick="provision('data')">Provision Data</button>
+      </article>
+    </div>
+
+    <div class="section-heading"><div><span class="eyebrow">YOUR WORKSPACES</span><h2>Continue where you left off</h2></div><button class="ghost" onclick="loadEnvironments()">Refresh</button></div>
+    <div id="environments" class="environment-list"></div>
   </section>
 </main>
+<div id="toast" class="toast" hidden></div>
 <script src="/app.js"></script>
 </body>
 </html>
