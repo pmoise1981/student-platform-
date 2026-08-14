@@ -5,14 +5,15 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# Keep local config aligned with the current example during first bootstrap.
 if [ ! -f .env ]; then
   cp .env.example .env
+else
+  # Migrate the original local default from 5432 to the platform's dedicated 5433 port.
+  sed -i 's#localhost:5432/platform#localhost:5433/platform#' .env
 fi
 
 docker compose up -d postgres
 
-# Wait for the control-plane database rather than racing Alembic against startup.
 until docker compose exec -T postgres pg_isready -U platform -d platform >/dev/null 2>&1; do
   sleep 1
 done
